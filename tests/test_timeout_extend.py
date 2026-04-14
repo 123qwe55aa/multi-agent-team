@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 from contracts import normalize_request
-from orchestrator import Orchestrator, SubagentType, TeamLeader, WorkflowConfig
+from orchestrator import Orchestrator, SubagentType, TeamLeader, WorkflowConfig, TimeoutExpired as TeamTimeoutExpired
 from run import InteractiveREPL
 
 
@@ -300,47 +300,41 @@ class TestInteractiveREPLExtend(unittest.TestCase):
 
 
 class TestPartialOutputOnTimeout(unittest.TestCase):
-    """Partial output capture when subagent times out."""
+    """Partial output capture when subagent times out via streaming buffer."""
 
-    def _make_timeout_expired(self, stdout: bytes | str = b"partial output here",
-                               stderr: bytes | str = b"") -> subprocess.TimeoutExpired:
-        """Factory: build a TimeoutExpired with given stdout/stderr."""
-        exc = subprocess.TimeoutExpired("claude", 300)
-        object.__setattr__(exc, "stdout", stdout)
-        object.__setattr__(exc, "stderr", stderr)
-        return exc
+    def _raise_timeout(self, stdout: str = "partial output here",
+                       stderr: str = "") -> None:
+        """Raise our custom TimeoutExpired with given output."""
+        raise TeamTimeoutExpired("claude", 300, stdout, stderr)
 
     def test_timeout_returns_timeout_retry_status(self) -> None:
         """TimeoutExpired is caught and returns status='timeout_retry'."""
         leader = TeamLeader(task="test task", config=WorkflowConfig())
-        with patch("subprocess.run", side_effect=self._make_timeout_expired()):
+        with patch.object(leader, "_run_with_buffer", side_effect=lambda *a, **kw: self._raise_timeout()):
             result = leader.spawn_subagent(SubagentType.CODING)
         self.assertEqual(result.status, "timeout_retry")
 
     def test_timeout_captures_stdout_in_raw_output(self) -> None:
         """Partial stdout is captured in raw_output field."""
         leader = TeamLeader(task="test task", config=WorkflowConfig())
-        with patch("subprocess.run", side_effect=self._make_timeout_expired(
-            stdout=b"created file foo.py\nimplemented bar()"
-        )):
+        with patch.object(leader, "_run_with_buffer",
+                          side_effect=lambda *a, **kw: self._raise_timeout(stdout="created file foo.py\nimplemented bar()")):
             result = leader.spawn_subagent(SubagentType.CODING)
         self.assertEqual(result.raw_output, "created file foo.py\nimplemented bar()")
 
     def test_timeout_captures_str_stdout(self) -> None:
-        """Partial stdout (str) is captured directly when text=True."""
+        """Partial stdout (str) is captured directly."""
         leader = TeamLeader(task="test task", config=WorkflowConfig())
-        with patch("subprocess.run", side_effect=self._make_timeout_expired(
-            stdout="partial string output"
-        )):
+        with patch.object(leader, "_run_with_buffer",
+                          side_effect=lambda *a, **kw: self._raise_timeout(stdout="partial string output")):
             result = leader.spawn_subagent(SubagentType.CODING)
         self.assertEqual(result.raw_output, "partial string output")
 
     def test_timeout_falls_back_to_stderr_when_stdout_empty(self) -> None:
         """When stdout is empty, stderr is used as fallback."""
         leader = TeamLeader(task="test task", config=WorkflowConfig())
-        with patch("subprocess.run", side_effect=self._make_timeout_expired(
-            stdout=b"", stderr=b"partial error output"
-        )):
+        with patch.object(leader, "_run_with_buffer",
+                          side_effect=lambda *a, **kw: self._raise_timeout(stdout="", stderr="partial error output")):
             result = leader.spawn_subagent(SubagentType.CODING)
         self.assertEqual(result.raw_output, "partial error output")
 
@@ -348,9 +342,8 @@ class TestPartialOutputOnTimeout(unittest.TestCase):
         """When output > 100 lines, only last 100 lines are kept."""
         lines = [f"line {i}" for i in range(150)]
         leader = TeamLeader(task="test task", config=WorkflowConfig())
-        with patch("subprocess.run", side_effect=self._make_timeout_expired(
-            stdout="\n".join(lines)
-        )):
+        with patch.object(leader, "_run_with_buffer",
+                          side_effect=lambda *a, **kw: self._raise_timeout(stdout="\n".join(lines))):
             result = leader.spawn_subagent(SubagentType.CODING)
         captured_lines = result.raw_output.splitlines()
         self.assertEqual(len(captured_lines), 100)
@@ -360,16 +353,15 @@ class TestPartialOutputOnTimeout(unittest.TestCase):
         """Timeout triggers 2x multiplier extension."""
         leader = TeamLeader(task="test task", config=WorkflowConfig())
         self.assertEqual(leader._timeout_multipliers.get("coding"), None)
-        with patch("subprocess.run", side_effect=self._make_timeout_expired()):
+        with patch.object(leader, "_run_with_buffer", side_effect=lambda *a, **kw: self._raise_timeout()):
             leader.spawn_subagent(SubagentType.CODING)
         self.assertEqual(leader._timeout_multipliers.get("coding"), 2.0)
 
     def test_timeout_summary_mentions_partial_work(self) -> None:
         """Summary message confirms partial work was captured."""
         leader = TeamLeader(task="test task", config=WorkflowConfig())
-        with patch("subprocess.run", side_effect=self._make_timeout_expired(
-            stdout=b"some partial work"
-        )):
+        with patch.object(leader, "_run_with_buffer",
+                          side_effect=lambda *a, **kw: self._raise_timeout(stdout="some partial work")):
             result = leader.spawn_subagent(SubagentType.CODING)
         self.assertIn("Partial work captured", result.summary)
         self.assertIn("some partial work", result.raw_output)
