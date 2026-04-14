@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -1262,8 +1262,27 @@ IMPORTANT: When done, output a JSON block with your results:
             if coding_result.status == "timeout_retry":
                 coding_retries += 1
                 logger.info(f"TeamLeader {self.id} coding timed out, retry {coding_retries} with extended timeout")
+
+                # Detect if subagent is producing no output (provider unreachable)
+                has_partial = bool(coding_result.raw_output)
+                if not has_partial:
+                    logger.warning(f"TeamLeader {self.id} coding timeout with empty output — possible provider issue")
+
                 if coding_retries >= 3:
                     logger.warning(f"TeamLeader {self.id} max coding retries reached")
+                    break
+                # If all 3 retries had empty output, escalate instead of retrying blindly
+                if coding_retries >= 2 and not has_partial:
+                    logger.error(f"TeamLeader {self.id} all coding retries produced empty output — escalating")
+                    coding_result = replace(
+                        coding_result,
+                        status="failed",
+                        summary=(
+                            f"Coding agent timed out {coding_retries} times with no output. "
+                            f"This usually means the provider (MiniMax API) is unreachable through the proxy. "
+                            f"Use '/team debug ping' to verify connectivity."
+                        ),
+                    )
                     break
                 if coding_result.raw_output:
                     coding_extra_context = (

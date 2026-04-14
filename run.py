@@ -101,6 +101,103 @@ class InteractiveREPL:
         print(f"  Current multipliers: {self.timeout_multipliers}")
         return True
 
+    def _do_debug(self, args_str: str) -> bool:
+        """Handle /team debug command — white-box workflow testing.
+
+        Usage:
+            /team debug ping              — test MiniMax API connectivity
+            /team debug pm <task>        — run PM agent only
+            /team debug coding <task>     — run coding agent only (short timeout)
+            /team debug coding <task> --timeout 60
+        """
+        import subprocess
+        from orchestrator import SubagentType
+
+        parts = args_str.strip().split()
+        if not parts:
+            print("Usage: /team debug ping | pm <task> | coding <task> [--timeout N]")
+            return True
+
+        cmd_type = parts[0].lower()
+
+        if cmd_type == "ping":
+            print("[DEBUG] Testing claude CLI with MiniMax-M2.7...")
+            try:
+                result = subprocess.run(
+                    ["claude", "--model", "MiniMax-M2.7", "--dangerously-skip-permissions", "--print", "reply OK"],
+                    capture_output=True, text=True, timeout=15
+                )
+                print(f"[DEBUG] RC={result.returncode}")
+                print(f"[DEBUG] STDOUT: {result.stdout[:200]!r}")
+                print(f"[DEBUG] STDERR: {result.stderr[:200]!r}")
+                if result.returncode == 0 and result.stdout.strip():
+                    print("[DEBUG] ✓ MiniMax API reachable")
+                else:
+                    print("[DEBUG] ✗ MiniMax API returned non-zero or empty")
+            except subprocess.TimeoutExpired:
+                print("[DEBUG] ✗ claude CLI timed out — MiniMax API unreachable")
+            except FileNotFoundError:
+                print("[DEBUG] ✗ 'claude' command not found in PATH")
+            return True
+
+        if cmd_type == "pm":
+            if len(parts) < 2:
+                print("Usage: /team debug pm <task>")
+                return True
+            task_text = " ".join(parts[1:])
+            print(f"[DEBUG] Running PM agent for: {task_text[:80]}...")
+            # Use the orchestrator's TeamLeader
+            from orchestrator import TeamLeader, WorkflowConfig
+            leader = TeamLeader(task=task_text, config=WorkflowConfig())
+            result = leader.spawn_pm()
+            print(f"[DEBUG] PM status: {result.criteria[:2] if result.criteria else 'none'}...")
+            print(f"[DEBUG] PM raw_output: {result.raw_output[:300]!r}")
+            return True
+
+        if cmd_type == "coding":
+            # Parse optional --timeout flag
+            timeout_override = None
+            task_parts = []
+            i = 1
+            while i < len(parts):
+                if parts[i] == "--timeout":
+                    i += 1
+                    if i >= len(parts):
+                        print("Usage: /team debug coding <task> [--timeout N]")
+                        return True
+                    try:
+                        timeout_override = int(parts[i])
+                    except ValueError:
+                        print(f"Usage: --timeout must be an integer, got: {parts[i]!r}")
+                        return True
+                else:
+                    task_parts.append(parts[i])
+                i += 1
+            task_text = " ".join(task_parts) if task_parts else "implement a simple hello world in python"
+            print(f"[DEBUG] Running Coding agent for: {task_text[:80]}...")
+            print(f"[DEBUG] Timeout override: {timeout_override}s")
+
+            from orchestrator import TeamLeader, WorkflowConfig, SubagentType
+            leader = TeamLeader(task=task_text, config=WorkflowConfig())
+            if timeout_override:
+                leader.extend_timeout("coding", timeout_override / 300.0)  # scale relative to base
+
+            try:
+                result = leader.spawn_subagent(SubagentType.CODING)
+            except Exception as e:
+                print(f"[DEBUG] Exception: {e}")
+                return True
+
+            print(f"[DEBUG] Coding status: {result.status}")
+            print(f"[DEBUG] Coding summary: {result.summary[:200]!r}")
+            print(f"[DEBUG] Coding raw_output ({len(result.raw_output)} chars): {result.raw_output[:300]!r}")
+            print(f"[DEBUG] Coding files_changed: {result.files_changed}")
+            return True
+
+        print(f"Unknown debug type: {cmd_type}")
+        print("Usage: /team debug ping | pm <task> | coding <task>")
+        return True
+
     def _do_run(self, task: str) -> None:
         """Execute a task with the configured multipliers."""
         if not task.strip():
@@ -153,7 +250,10 @@ class InteractiveREPL:
         print("  /team extend <scope> <multiplier>  Set timeout multiplier (e.g. /team extend coding 2.0)")
         print("  /team extend <multiplier>          Apply multiplier to all agents")
         print("  /team extend reset                Reset all multipliers to 1.0")
-        print("  run <task>                        Execute a task")
+        print("  /team debug ping                 Test MiniMax API connectivity")
+        print("  /team debug pm <task>            Run PM agent only")
+        print("  /team debug coding <task> [--timeout N]  Run coding agent only")
+        print("  run <task>                        Execute a full task")
         print("  exit                              Exit")
         print()
 
@@ -177,6 +277,9 @@ class InteractiveREPL:
                     print("Usage: /team extend <scope> <multiplier> or /team extend reset")
                     continue
                 self._do_extend(args_str)
+            elif line.startswith("/team debug"):
+                args_str = line[len("/team debug"):].strip()
+                self._do_debug(args_str)
             elif line.startswith("run "):
                 task = line[4:].strip()
                 self._do_run(task)
