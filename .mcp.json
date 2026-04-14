@@ -1,0 +1,6 @@
+{
+  "multi-agent-team": {
+    "command": "python",
+    "args": ["/Users/toby/multi-agent-team/server.py"]
+  }
+}

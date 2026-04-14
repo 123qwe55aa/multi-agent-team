@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.coverage
+*.egg-info/
+.pytest_cache/
+.mcp.json
+logs/
+*.log
+.DS_Store
