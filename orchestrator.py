@@ -439,17 +439,25 @@ Output a JSON object with: {"status": "all-pass|some-fail|all-fail", "coverage":
                     summary=f"Unknown provider: {provider}",
                     confidence=0.0,
                 )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
             logger.error(f"TeamLeader {self.id} {agent_type.value} agent timed out")
             if self._logger:
                 self._logger.log_subagent_timeout(agent_key, self._calculate_timeout(agent_type, full_task))
+            # Capture partial stdout from the timed-out process; stderr is fallback
+            partial_output = ""
+            raw_bytes = e.stdout or e.stderr or b""
+            if raw_bytes:
+                raw = raw_bytes if isinstance(raw_bytes, str) else raw_bytes.decode("utf-8", errors="replace")
+                lines = raw.strip().splitlines()
+                partial_output = "\n".join(lines[-100:]) if len(lines) > 100 else raw.strip()
             # Auto-extend timeout for this agent type on timeout
             current_mult = self._timeout_multipliers.get(agent_key, 1.0)
             self.extend_timeout(agent_key, current_mult * 2.0)
             return SubagentResult(
                 agent_type=agent_type,
                 status="timeout_retry",
-                summary=f"Agent timed out after {self._calculate_timeout(agent_type, full_task)}s. Timeout extended to {int(current_mult * 2.0)}x for retry. No partial output available.",
+                summary=f"Agent timed out. Partial work captured ({len(partial_output)} chars). Timeout extended to {current_mult * 2.0:.1f}x for retry.",
+                raw_output=partial_output,
                 confidence=0.0,
                 escalation_triggers=[EscalationType.RESOURCE],
             )
@@ -1082,12 +1090,13 @@ IMPORTANT: When done, output a JSON block with your results:
         self.state = TeamState.CODING
         self.completed_phases.append("coding")
         coding_retries = 0
+        coding_extra_context = ""  # partial work logs from previous timeout attempts
         while True:
             if self._logger:
                 self._logger.log_phase_start("coding")
             coding_result = self.spawn_subagent(
                 SubagentType.CODING,
-                task_suffix=f"\n\n{criteria_context}\n\n{breakdown_context}"
+                task_suffix=f"\n\n{criteria_context}\n\n{breakdown_context}{coding_extra_context}"
             )
             self.results[SubagentType.CODING] = coding_result
             self._log_subagent_completion("coding", coding_result)
@@ -1099,7 +1108,14 @@ IMPORTANT: When done, output a JSON block with your results:
                 if coding_retries >= 3:
                     logger.warning(f"TeamLeader {self.id} max coding retries reached")
                     break
-                continue  # Retry with extended timeout
+                if coding_result.raw_output:
+                    coding_extra_context = (
+                        f"\n\n=== PARTIAL WORK FROM TIMEOUT (attempt {coding_retries}) ===\n"
+                        f"Previous coding agent timed out but produced partial output. "
+                        f"Continue from where it left off:\n{coding_result.raw_output}\n"
+                        f"=== END PARTIAL WORK ==="
+                    )
+                continue  # Retry with extended timeout and partial context
             break  # Normal exit
 
         # Check escalation
@@ -1120,12 +1136,14 @@ IMPORTANT: When done, output a JSON block with your results:
         self.state = TeamState.TESTING
         self.completed_phases.append("testing")
         testing_retries = 0
+        testing_extra_context = ""  # partial work logs from previous timeout attempts
         while True:
             if self._logger:
                 self._logger.log_phase_start("testing")
+            files_ctx = ', '.join(coding_result.files_changed) if coding_result.files_changed else 'none yet - coding may still be running'
             testing_result = self.spawn_subagent(
                 SubagentType.TESTING,
-                task_suffix=f"Files to test: {', '.join(coding_result.files_changed) if coding_result.files_changed else 'none yet - coding may still be running'}"
+                task_suffix=f"Files to test: {files_ctx}{testing_extra_context}"
             )
             self.results[SubagentType.TESTING] = testing_result
             self._log_subagent_completion("testing", testing_result)
@@ -1137,7 +1155,14 @@ IMPORTANT: When done, output a JSON block with your results:
                 if testing_retries >= 3:
                     logger.warning(f"TeamLeader {self.id} max testing retries reached")
                     break
-                continue  # Retry with extended timeout
+                if testing_result.raw_output:
+                    testing_extra_context = (
+                        f"\n\n=== PARTIAL WORK FROM TIMEOUT (attempt {testing_retries}) ===\n"
+                        f"Previous testing agent timed out but produced partial output. "
+                        f"Continue from where it left off:\n{testing_result.raw_output}\n"
+                        f"=== END PARTIAL WORK ==="
+                    )
+                continue  # Retry with extended timeout and partial context
             break  # Normal exit
 
         # Testing gate
